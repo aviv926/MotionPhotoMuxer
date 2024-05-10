@@ -103,11 +103,14 @@ def add_xmp_metadata(merged_file, offset):
         1500000)  # in Apple Live Photos, the chosen photo is 1.5s after the start of the video
     metadata.write()
 
+merged_files = []
+
 def convert(photo_path, video_path, output_path):
     """Performs the conversion process."""
     if not validate_media(photo_path, video_path):
         logging.error("Invalid photo or video path.")
-        sys.exit(1)
+        return
+
     # Extracting truncated paths
     truncated_photo_path = '/'.join(photo_path.split('/')[-3:])
     truncated_video_path = '/'.join(video_path.split('/')[-3:])
@@ -117,7 +120,7 @@ def convert(photo_path, video_path, output_path):
     offset = merged_filesize - photo_filesize
     add_xmp_metadata(merged, offset)
     logging.info("Conversion complete for photo: {} and video: {}".format(truncated_photo_path, truncated_video_path))
-
+    merged_files.append(merged)
 
 def matching_video(photo_path, video_dir):
     base = os.path.splitext(basename(photo_path))[0]
@@ -209,7 +212,7 @@ def convert_all_heic_files(input_dir, output_dir):
             file_path = os.path.join(root, file)
             if file.lower().endswith('.heic'):
                 convert_heic_to_jpeg(file_path)
-                
+
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     logging.info("Welcome to the Apple Live Photos to Google Motion Photos converter.")
@@ -228,6 +231,33 @@ def main():
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         logging.info("Created output directory: {}".format(output_dir))
+
+
+ # Prompt for handling merged files
+    handle_merged_files = input("What do you want to do with the merged HEIC and MOV/MP4 files?\n"
+                                "1. Delete the files used for the merger.\n"
+                                "2. Move the files used for the merger to a separate folder.\n"
+                                "Enter your choice (1 or 2): ").strip()
+
+    if handle_merged_files == '1':
+        # Delete the merged files
+        logging.info("Deleting the merged HEIC and MOV/MP4 files.")
+        for merged_file in merged_files:
+            os.remove(merged_file)
+            logging.info("Deleted file: {}".format(merged_file))
+    elif handle_merged_files == '2':
+        # Move the merged files to a separate folder
+        merged_files_dir = input("Enter the directory path to move the merged files (default is 'merged_files'): ").strip() or "merged_files"
+        if not os.path.exists(merged_files_dir):
+            os.makedirs(merged_files_dir)
+            logging.info("Created merged files directory: {}".format(merged_files_dir))
+
+        logging.info("Moving the merged HEIC and MOV/MP4 files to: {}".format(merged_files_dir))
+        for merged_file in merged_files:
+            shutil.move(merged_file, merged_files_dir)
+            logging.info("Moved file: {} to {}".format(merged_file, merged_files_dir))
+    else:
+        logging.error("Invalid choice. Please enter 1 or 2.")
 
     # Prompt for conversion mode
     conversion_mode = input("Choose conversion mode:\n"
