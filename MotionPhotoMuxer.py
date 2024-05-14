@@ -4,8 +4,10 @@ import os
 import shutil
 import sys
 from os.path import exists, basename, isdir
-
+from PIL import Image
+import pyheif
 import pyexiv2
+
 
 def validate_directory(dir):
     
@@ -83,13 +85,37 @@ def add_xmp_metadata(merged_file, offset):
     metadata.write()
 
 
-def convert(photo_path, video_path, output_path):
+def convert(photo_path, video_path, output_path, convert_all=False):
     """
     Performs the conversion process to mux the files together into a Google Motion Photo.
     :param photo_path: path to the photo to merge
     :param video_path: path to the video to merge
+    :param convert_all: if True, convert all HEIC files to JPEG regardless of video presence and size
     :return: True if conversion was successful, else False
     """
+    if not convert_all:
+        video_size_limit_mb = 10  # Set the video size limit to 10MB
+        if not os.path.exists(video_path) or os.path.getsize(video_path) > video_size_limit_mb * 1024 * 1024:
+            logging.warning("Skipping conversion of {} due to missing or large video file.".format(photo_path))
+            return False
+
+    if photo_path.lower().endswith('.heic'):
+        # Convert HEIC to JPEG
+        with open(photo_path, 'rb') as f:
+            heif_file = pyheif.read(f)
+            image = Image.frombytes(
+                heif_file.mode, 
+                heif_file.size, 
+                heif_file.data,
+                "raw",
+                heif_file.mode,
+                heif_file.stride,
+            )
+            jpeg_path = os.path.splitext(photo_path)[0] + '.jpg'
+            image.save(jpeg_path, "JPEG", quality=100, exif=heif_file.metadata)
+
+        photo_path = jpeg_path
+
     merged = merge_files(photo_path, video_path, output_path)
     photo_filesize = os.path.getsize(photo_path)
     merged_filesize = os.path.getsize(merged)
@@ -99,103 +125,134 @@ def convert(photo_path, video_path, output_path):
     offset = merged_filesize - photo_filesize
     add_xmp_metadata(merged, offset)
 
+
 def matching_video(photo_path):
     base = os.path.splitext(photo_path)[0]
     logging.info("Looking for videos named: {}".format(base))
-    if os.path.exists(base + ".mov"):
-        return base + ".mov"
-    if os.path.exists(base + ".mp4"):
-        return base + ".mp4"
-    if os.path.exists(base + ".MOV"):
-        return base + ".MOV"
-    if os.path.exists(base + ".MP4"):
-        return base + ".MP4"
-    else:
-        return ""
+    for ext in ('.mov', '.mp4', '.MOV', '.MP4'):
+        video_path = base + ext
+        if os.path.exists(video_path):
+            return video_path
+    return ""
 
 
 def process_directory(file_dir, recurse):
     """
     Loops through files in the specified directory and generates a list of (photo, video) path tuples that can
     be converted
-    :TODO: Implement recursive scan
     :param file_dir: directory to look for photos/videos to convert
     :param recurse: if true, subdirectories will recursively be processes
     :return: a list of tuples containing matched photo/video pairs.
     """
     logging.info("Processing dir: {}".format(file_dir))
-    if recurse:
-        logging.error("Recursive traversal is not implemented yet.")
-        exit(1)
-
     file_pairs = []
-    for file in os.listdir(file_dir):
-        file_fullpath = os.path.join(file_dir, file)
-        if os.path.isfile(file_fullpath) and file.lower().endswith(('.jpg', '.jpeg')) and matching_video(
-                file_fullpath) != "":
-            file_pairs.append((file_fullpath, matching_video(file_fullpath)))
+    for root, dirs, files in os.walk(file_dir):
+        for file in files:
+            file_fullpath = os.path.join(root, file)
+            if os.path.isfile(file_fullpath):
+                base_name, ext = os.path.splitext(file)
+                if ext.lower() in ('.jpg', '.jpeg', '.heic'):
+                    video_path = matching_video(file_fullpath)
+                    if video_path:
+                        file_pairs.append((file_fullpath, video_path))
 
     logging.info("Found {} pairs.".format(len(file_pairs)))
-    logging.info("subset of found image/video pairs: {}".format(str(file_pairs[0:9])))
+    logging.info("Subset of found image/video pairs: {}".format(str(file_pairs[:min(10, len(file_pairs))])))
     return file_pairs
 
 
-def main(args):
-    logging_level = logging.INFO if args.verbose else logging.ERROR
+
+def main():
+    logging_level = logging.INFO
     logging.basicConfig(level=logging_level, stream=sys.stdout)
     logging.info("Enabled verbose logging")
 
-    outdir = args.output if args.output is not None else "output"
+    source_dir = get_source_directory()
+    out_dir = get_destination_directory()
+    convert_all = ask_convert_all()
 
-    if args.dir is not None:
-        validate_directory(args.dir)
-        pairs = process_directory(args.dir, args.recurse)
-        procesed_files = set()
-        for pair in pairs:
-            if validate_media(pair[0], pair[1]):
-                convert(pair[0], pair[1], outdir)
-                procesed_files.add(pair[0])
-                procesed_files.add(pair[1])
+    pairs = process_directory(source_dir)
+    processed_files = set()
+    for pair in pairs:
+        if validate_media(pair[0], pair[1]):
+            convert(pair[0], pair[1], out_dir, convert_all)
+            processed_files.add(pair[0])
+            processed_files.add(pair[1])
 
-        if args.copyall:
-            # Copy the remaining files to outdir
-            all_files = set(os.path.join(args.dir, file) for file in os.listdir(args.dir))
-            remaining_files = all_files - procesed_files
+    if ask_copy_all():
+        # Copy the remaining files to out_dir
+        all_files = set(os.path.join(source_dir, file) for file in os.listdir(source_dir))
+        remaining_files = all_files - processed_files
 
-            logging.info("Found {} remaining files that will copied.".format(len(remaining_files)))
+        logging.info("Found {} remaining files that will be copied.".format(len(remaining_files)))
 
-            if len(remaining_files) > 0:
-                # Ensure the destination directory exists
-                os.makedirs(outdir, exist_ok=True)
-                
-                for file in remaining_files:
-                    file_name = os.path.basename(file)
-                    destination_path = os.path.join(outdir, file_name)
-                    shutil.copy2(file, destination_path)
-    else:
-        if args.photo is None and args.video is None:
-            logging.error("Either --dir or --photo and --video are required.")
-            exit(1)
+        if len(remaining_files) > 0:
+            # Ensure the destination directory exists
+            os.makedirs(out_dir, exist_ok=True)
+            
+            for file in remaining_files:
+                file_name = os.path.basename(file)
+                destination_path = os.path.join(out_dir, file_name)
+                shutil.copy2(file, destination_path)
 
-        if bool(args.photo) ^ bool(args.video):
-            logging.error("Both --photo and --video must be provided.")
-            exit(1)
+    delete_converted_files = ask_delete_converted_files()
+    if delete_converted_files:
+        delete_files(processed_files)
 
-        if validate_media(args.photo, args.video):
-            convert(args.photo, args.video, outdir)
+def ask_delete_converted_files():
+    """Ask the user if they want to delete converted files."""
+    while True:
+        choice = input("Do you want to delete converted files (HEIC and video files)? (yes/no): ").strip().lower()
+        if choice in ('yes', 'no'):
+            return choice == 'yes'
+        else:
+            print("Please enter 'yes' or 'no'.")
 
+def delete_files(files):
+    """Delete the specified files."""
+    for file in files:
+        try:
+            os.remove(file)
+            logging.info("Deleted file: {}".format(file))
+        except Exception as e:
+            logging.error("Error deleting file '{}': {}".format(file, str(e)))
+
+
+def get_source_directory():
+    """Prompt the user to input the source directory."""
+    while True:
+        source_dir = input("Enter the source directory: ").strip()
+        if not os.path.isdir(source_dir):
+            print("Error: '{}' is not a valid directory.".format(source_dir))
+        else:
+            return source_dir
+
+def get_destination_directory():
+    """Prompt the user to input the destination directory."""
+    while True:
+        dest_dir = input("Enter the destination directory: ").strip()
+        if not os.path.isdir(dest_dir):
+            print("Error: '{}' is not a valid directory.".format(dest_dir))
+        else:
+            return dest_dir
+
+def ask_convert_all():
+    """Ask the user if they want to convert all HEIC files to JPEG."""
+    while True:
+        choice = input("Do you want to convert all HEIC files to JPEG? (yes/no): ").strip().lower()
+        if choice in ('yes', 'no'):
+            return choice == 'yes'
+        else:
+            print("Please enter 'yes' or 'no'.")
+
+def ask_copy_all():
+    """Ask the user if they want to copy all unprocessed files to the destination directory."""
+    while True:
+        choice = input("Do you want to copy all unprocessed files to the destination directory? (yes/no): ").strip().lower()
+        if choice in ('yes', 'no'):
+            return choice == 'yes'
+        else:
+            print("Please enter 'yes' or 'no'.")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Merges a photo and video into a Microvideo-formatted Google Motion Photo')
-    parser.add_argument('--verbose', help='Show logging messages.', action='store_true')
-    parser.add_argument('--dir', type=str, help='Process a directory for photos/videos. Takes precedence over '
-                                                '--photo/--video')
-    parser.add_argument('--recurse', help='Recursively process a directory. Only applies if --dir is also provided',
-                        action='store_true')
-    parser.add_argument('--photo', type=str, help='Path to the JPEG photo to add.')
-    parser.add_argument('--video', type=str, help='Path to the MOV video to add.')
-    parser.add_argument('--output', type=str, help='Path to where files should be written out to.')
-    parser.add_argument('--copyall', help='Copy unpaired files to directory.', action='store_true')
-
-    main(parser.parse_args())
+    main()
