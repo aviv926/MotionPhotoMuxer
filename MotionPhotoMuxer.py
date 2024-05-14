@@ -171,7 +171,7 @@ def main():
     out_dir = get_destination_directory()
     convert_all = ask_convert_all()
 
-    pairs = process_directory(source_dir)
+    pairs = process_directory(source_dir, recurse=False)  # Fix the missing argument
     processed_files = set()
     for pair in pairs:
         if validate_media(pair[0], pair[1]):
@@ -180,7 +180,7 @@ def main():
             processed_files.add(pair[1])
 
     if ask_copy_all():
-        # Copy the remaining files to out_dir
+        # Populate remaining_files if the user chooses to copy unprocessed files
         all_files = set(os.path.join(source_dir, file) for file in os.listdir(source_dir))
         remaining_files = all_files - processed_files
 
@@ -191,9 +191,12 @@ def main():
             os.makedirs(out_dir, exist_ok=True)
             
             for file in remaining_files:
-                file_name = os.path.basename(file)
-                destination_path = os.path.join(out_dir, file_name)
-                shutil.copy2(file, destination_path)
+                if os.path.isfile(file):  # Check if it's a file before copying
+                    file_name = os.path.basename(file)
+                    destination_path = os.path.join(out_dir, file_name)
+                    shutil.copy2(file, destination_path)
+
+
 
     delete_converted_files = ask_delete_converted_files()
     if delete_converted_files:
