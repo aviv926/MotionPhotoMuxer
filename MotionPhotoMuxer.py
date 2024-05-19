@@ -32,6 +32,7 @@ def validate_file(file_path):
     return True
 
 def convert_heic_to_jpeg(heic_path):
+    """Converts a HEIC file to a JPEG file while copying the EXIF data."""
     logging.info("Converting HEIC file to JPEG: {}".format(heic_path))
     try:
         im = Image.open(heic_path)
@@ -48,8 +49,7 @@ def convert_heic_to_jpeg(heic_path):
         else:
             logging.warning("No EXIF data found in HEIC file.")
 
-        processed_files.append(heic_path)
-        processed_files.append(jpeg_path)
+        processed_files.extend([heic_path, jpeg_path])
         return jpeg_path
     except Exception as e:
         logging.warning("Error converting HEIC file: {}: {}".format(heic_path, str(e)))
@@ -73,7 +73,7 @@ def validate_media(photo_path, video_path):
     return True
 
 def merge_files(photo_path, video_path, output_path):
-    """Merges the photo and video file together."""
+    """Merges the photo and video files together."""
     logging.info("Merging {} and {}.".format(photo_path, video_path))
     out_path = os.path.join(output_path, "{}".format(basename(photo_path)))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -81,9 +81,7 @@ def merge_files(photo_path, video_path, output_path):
         outfile.write(photo.read())
         outfile.write(video.read())
     logging.info("Merged photo and video.")
-    processed_files.append(photo_path)
-    processed_files.append(video_path)
-    processed_files.append(out_path)
+    processed_files.extend([photo_path, video_path, out_path])
     return out_path
 
 def add_xmp_metadata(merged_file, offset):
@@ -124,6 +122,16 @@ def matching_video(photo_path, video_dir):
                 return os.path.join(root, file)
     return ""
 
+def unique_path(destination, filename):
+    """Generate a unique file path to avoid overwriting existing files."""
+    base, extension = os.path.splitext(filename)
+    counter = 1
+    new_filename = filename
+    while os.path.exists(os.path.join(destination, new_filename)):
+        new_filename = f"{base}({counter}){extension}"
+        counter += 1
+    return os.path.join(destination, new_filename)
+
 def process_directory(input_dir, output_dir, move_other_images, convert_all_heic):
     logging.info("Processing files in: {}".format(input_dir))
     
@@ -163,19 +171,11 @@ def process_directory(input_dir, output_dir, move_other_images, convert_all_heic
         for root, dirs, files in os.walk(input_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                if file.lower().endswith(('.heic', '.jpg', '.jpeg')):
+                if file.lower().endswith(('.heic', '.jpg', '.jpeg', '.mov', '.mp4')):
                     if not matching_video(file_path, input_dir):
-                        shutil.move(file_path, other_files_dir)
-                        logging.info("Moved {} to output directory.".format(file))
-                elif file.lower().endswith(('.mov', '.mp4')):
-                    photo_path = os.path.splitext(file_path)[0] + ".jpg"
-                    if not os.path.exists(photo_path):
-                        photo_path = os.path.splitext(file_path)[0] + ".jpeg"
-                    if not os.path.exists(photo_path):
-                        photo_path = os.path.splitext(file_path)[0] + ".HEIC"
-                    if not os.path.exists(photo_path):
-                        shutil.move(file_path, other_files_dir)
-                        logging.info("Moved {} to output directory.".format(file))
+                        unique_file_path = unique_path(other_files_dir, basename(file_path))
+                        shutil.move(file_path, unique_file_path)
+                        logging.info("Moved {} to output directory.".format(basename(unique_file_path)))
 
     logging.info("Cleanup complete.")
 
