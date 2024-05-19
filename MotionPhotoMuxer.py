@@ -1,17 +1,14 @@
-
 import logging
 import os
 import shutil
 import sys
 import pyexiv2
 import piexif
-import concurrent.futures
 from os.path import exists, basename, isdir, join, splitext
 from PIL import Image
-from tqdm import tqdm  # Import tqdm for progress bar
 
 problematic_files = []
-
+processed_files = []
 
 def validate_directory(dir):
     if not dir:
@@ -41,7 +38,7 @@ def convert_heic_to_jpeg(heic_path):
         jpeg_path = splitext(heic_path)[0] + ".jpg"
         im.convert("RGB").save(jpeg_path, "JPEG")
         logging.info("HEIC file converted to JPEG: {}".format(jpeg_path))
-        
+
         # Copy EXIF data from HEIC to JPEG
         exif_dict = piexif.load(heic_path)
         if exif_dict:
@@ -50,10 +47,12 @@ def convert_heic_to_jpeg(heic_path):
             logging.info("EXIF data copied from HEIC to JPEG.")
         else:
             logging.warning("No EXIF data found in HEIC file.")
-        
+
+        processed_files.append(heic_path)
+        processed_files.append(jpeg_path)
         return jpeg_path
     except Exception as e:
-        logging.warning("Error converting HEIC file: {}".format(heic_path))
+        logging.warning("Error converting HEIC file: {}: {}".format(heic_path, str(e)))
         problematic_files.append(heic_path)
         return None
 
@@ -82,6 +81,9 @@ def merge_files(photo_path, video_path, output_path):
         outfile.write(photo.read())
         outfile.write(video.read())
     logging.info("Merged photo and video.")
+    processed_files.append(photo_path)
+    processed_files.append(video_path)
+    processed_files.append(out_path)
     return out_path
 
 def add_xmp_metadata(merged_file, offset):
@@ -103,33 +105,26 @@ def add_xmp_metadata(merged_file, offset):
         1500000)  # in Apple Live Photos, the chosen photo is 1.5s after the start of the video
     metadata.write()
 
-merged_files = []
-
 def convert(photo_path, video_path, output_path):
     """Performs the conversion process."""
     if not validate_media(photo_path, video_path):
         logging.error("Invalid photo or video path.")
-        return
-
-    # Extracting truncated paths
-    truncated_photo_path = '/'.join(photo_path.split('/')[-3:])
-    truncated_video_path = '/'.join(video_path.split('/')[-3:])
+        sys.exit(1)
     merged = merge_files(photo_path, video_path, output_path)
     photo_filesize = os.path.getsize(photo_path)
     merged_filesize = os.path.getsize(merged)
     offset = merged_filesize - photo_filesize
     add_xmp_metadata(merged, offset)
-    logging.info("Conversion complete for photo: {} and video: {}".format(truncated_photo_path, truncated_video_path))
-    merged_files.append(merged)
 
 def matching_video(photo_path, video_dir):
     base = os.path.splitext(basename(photo_path))[0]
-    for file in os.listdir(video_dir):
-        if file.startswith(base) and file.lower().endswith(('.mov', '.mp4')):
-            return join(video_dir, file)
+    for root, dirs, files in os.walk(video_dir):
+        for file in files:
+            if file.startswith(base) and file.lower().endswith(('.mov', '.mp4')):
+                return os.path.join(root, file)
     return ""
 
-def process_directory(input_dir, output_dir, move_other_images):
+def process_directory(input_dir, output_dir, move_other_images, convert_all_heic):
     logging.info("Processing files in: {}".format(input_dir))
     
     if not validate_directory(input_dir):
@@ -140,85 +135,56 @@ def process_directory(input_dir, output_dir, move_other_images):
         logging.error("Invalid output directory.")
         sys.exit(1)
        
-    photo_video_pairs = []
+    matching_pairs = 0
     for root, dirs, files in os.walk(input_dir):
         for file in files:
             file_path = os.path.join(root, file)
             if file.lower().endswith('.heic'):
-                jpeg_path = convert_heic_to_jpeg(file_path)
-                if jpeg_path:
-                    video_path = matching_video(jpeg_path, input_dir)
-                    if video_path:
-                        photo_video_pairs.append((jpeg_path, video_path))
+                if convert_all_heic or matching_video(file_path, input_dir):
+                    jpeg_path = convert_heic_to_jpeg(file_path)
+                    if jpeg_path:
+                        video_path = matching_video(jpeg_path, input_dir)
+                        if video_path:
+                            convert(jpeg_path, video_path, output_dir)
+                            matching_pairs += 1
             elif file.lower().endswith(('.jpg', '.jpeg')):
                 video_path = matching_video(file_path, input_dir)
                 if video_path:
-                    photo_video_pairs.append((file_path, video_path))
+                    convert(file_path, video_path, output_dir)
+                    matching_pairs += 1
 
-    # Parallelize the conversion process with progress bar
-    with tqdm(total=len(photo_video_pairs), desc="Converting files") as pbar:
-        def update_progress(future):
-            pbar.update(1)
-            try:
-                future.result()
-            except Exception as exc:
-                logging.error("Conversion process failed: {}".format(exc))
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(convert, photo_path, video_path, output_dir) for photo_path, video_path in photo_video_pairs]
-            for future in concurrent.futures.as_completed(futures):
-                update_progress(future)
+    logging.info("Conversion complete.")
+    logging.info("Found {} matching HEIC/JPEG and MOV/MP4 pairs.".format(matching_pairs))
 
     # Move non-matching files to output directory
     if move_other_images:
+        other_files_dir = os.path.join(output_dir, "other_files")
+        os.makedirs(other_files_dir, exist_ok=True)
         for root, dirs, files in os.walk(input_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                if not matching_video(file_path, input_dir):
-                    try:
-                        shutil.move(file_path, output_dir)
+                if file.lower().endswith(('.heic', '.jpg', '.jpeg')):
+                    if not matching_video(file_path, input_dir):
+                        shutil.move(file_path, other_files_dir)
                         logging.info("Moved {} to output directory.".format(file))
-                    except shutil.Error as e:
-                        logging.warning("Error moving file: {}. Skipping move operation.".format(file_path))
-                        continue
+                elif file.lower().endswith(('.mov', '.mp4')):
+                    photo_path = os.path.splitext(file_path)[0] + ".jpg"
+                    if not os.path.exists(photo_path):
+                        photo_path = os.path.splitext(file_path)[0] + ".jpeg"
+                    if not os.path.exists(photo_path):
+                        photo_path = os.path.splitext(file_path)[0] + ".HEIC"
+                    if not os.path.exists(photo_path):
+                        shutil.move(file_path, other_files_dir)
+                        logging.info("Moved {} to output directory.".format(file))
 
-        # Remove remaining files in input directory
-        for root, dirs, files in os.walk(input_dir):
-            for file in files:
-                file_path = os.path.join(root, file)
-                os.remove(file_path)
-
-        logging.info("Cleanup complete.")
-    else:
-        logging.info("No other images moved to output directory. Cleanup skipped.")
-
-def convert_with_matching_videos(input_dir, output_dir):
-    logging.info("Converting HEIC files with matching videos only.")
-    for root, dirs, files in os.walk(input_dir):
-        for file in files:
-            file_path = os.path.join(root, file)
-            if file.lower().endswith('.heic'):
-                jpeg_path = convert_heic_to_jpeg(file_path)
-                if jpeg_path:
-                    video_path = matching_video(jpeg_path, input_dir)
-                    if video_path:
-                        logging.info("Found matching video pair for HEIC file at: {}".format(video_path))
-                        convert(jpeg_path, video_path, output_dir)
-
-def convert_all_heic_files(input_dir, output_dir):
-    logging.info("Converting all HEIC files to JPEG.")
-    for root, dirs, files in os.walk(input_dir):
-        for file in files:
-            file_path = os.path.join(root, file)
-            if file.lower().endswith('.heic'):
-                convert_heic_to_jpeg(file_path)
+    logging.info("Cleanup complete.")
 
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     logging.info("Welcome to the Apple Live Photos to Google Motion Photos converter.")
 
     # Prompt for directories
-    input_dir = input("Enter the directory path containing HEIC/JPEG/MOV/MP4 files: ").strip()
+    input_dir = input("Enter the directory path containing HEIC/JPEG/MOV/MP4 files in the same folder or subfolders: ").strip()
 
     if not validate_directory(input_dir):
         logging.error("Invalid directory path.")
@@ -227,55 +193,16 @@ def main():
     # Prompt for output directory
     output_dir = input("Enter the output directory path (default is 'output'): ").strip() or "output"
 
-    # Create the output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        logging.info("Created output directory: {}".format(output_dir))
-
-
- # Prompt for handling merged files
-    handle_merged_files = input("What do you want to do with the merged HEIC and MOV/MP4 files?\n"
-                                "1. Delete the files used for the merger.\n"
-                                "2. Move the files used for the merger to a separate folder.\n"
-                                "Enter your choice (1 or 2): ").strip()
-
-    if handle_merged_files == '1':
-        # Delete the merged files
-        logging.info("Deleting the merged HEIC and MOV/MP4 files.")
-        for merged_file in merged_files:
-            os.remove(merged_file)
-            logging.info("Deleted file: {}".format(merged_file))
-    elif handle_merged_files == '2':
-        # Move the merged files to a separate folder
-        merged_files_dir = input("Enter the directory path to move the merged files (default is 'merged_files'): ").strip() or "merged_files"
-        if not os.path.exists(merged_files_dir):
-            os.makedirs(merged_files_dir)
-            logging.info("Created merged files directory: {}".format(merged_files_dir))
-
-        logging.info("Moving the merged HEIC and MOV/MP4 files to: {}".format(merged_files_dir))
-        for merged_file in merged_files:
-            shutil.move(merged_file, merged_files_dir)
-            logging.info("Moved file: {} to {}".format(merged_file, merged_files_dir))
-    else:
-        logging.error("Invalid choice. Please enter 1 or 2.")
-
-    # Prompt for conversion mode
-    conversion_mode = input("Choose conversion mode:\n"
-                            "1. Convert all HEIC files to JPEG regardless of matching videos.\n"
-                            "2. Convert only HEIC files with matching MP4/MOV videos.\n"
-                            "Enter your choice (1 or 2): ").strip()
-
-    if conversion_mode == '1':
-        convert_all_heic_files(input_dir, output_dir)
-    elif conversion_mode == '2':
-        convert_with_matching_videos(input_dir, output_dir)
-    else:
-        logging.error("Invalid choice. Please enter 1 or 2.")
-        sys.exit(1)
-
     # Prompt for moving other images
-    move_other_images_str = input("Move other images to output directory? (y/n, default is 'n'): ").strip().lower()
+    move_other_images_str = input("Do you want to move non-matching files to the 'other_files' folder in the output directory? (y/n, default is 'n'): ").strip().lower()
     move_other_images = move_other_images_str == 'y'
+
+    # Prompt for converting all HEIC files to JPEG
+    convert_all_heic_str = input("Do you want to convert all HEIC files to JPEG, regardless of whether they have a matching MOV/MP4 file? (y/n, default is 'n'): ").strip().lower()
+    convert_all_heic = convert_all_heic_str == 'y'
+
+    # Perform the conversion
+    process_directory(input_dir, output_dir, move_other_images, convert_all_heic)
 
     # Output summary of problematic files
     if problematic_files:
@@ -289,6 +216,23 @@ def main():
             for file_path in problematic_files:
                 f.write(file_path + "\n")
 
+    # Prompt for deleting or saving original files
+    delete_original_str = input("Do you want to delete the original HEIC and MOV/MP4 files? If not, they will be saved. (y/n, default is 'n'): ").strip().lower()
+    delete_original = delete_original_str == 'y'
+
+    if delete_original:
+        delete_original_files()
+    else:
+        logging.info("Original HEIC and MOV/MP4 files will be saved.")
+
+def delete_original_files():
+    """Deletes only successfully processed original HEIC and MOV/MP4 files."""
+    logging.info("Deleting original HEIC and MOV/MP4 files.")
+    for file_path in processed_files:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info("Deleted original file: {}".format(file_path))
+    logging.info("Deletion complete.")
 
 if __name__ == '__main__':
     main()
