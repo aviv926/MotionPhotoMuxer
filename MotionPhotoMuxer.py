@@ -49,7 +49,7 @@ def convert_heic_to_jpeg(heic_path):
         else:
             logging.warning("No EXIF data found in HEIC file.")
 
-        processed_files.extend([heic_path, jpeg_path])
+        processed_files.append(heic_path)
         return jpeg_path
     except Exception as e:
         logging.warning("Error converting HEIC file: {}: {}".format(heic_path, str(e)))
@@ -81,7 +81,7 @@ def merge_files(photo_path, video_path, output_path):
         outfile.write(photo.read())
         outfile.write(video.read())
     logging.info("Merged photo and video.")
-    processed_files.extend([photo_path, video_path, out_path])
+    processed_files.extend([photo_path, video_path])
     return out_path
 
 def add_xmp_metadata(merged_file, offset):
@@ -94,7 +94,7 @@ def add_xmp_metadata(merged_file, offset):
     try:
         pyexiv2.xmp.register_namespace('http://ns.google.com/photos/1.0/camera/', 'GCamera')
     except KeyError:
-        logging.warning("exiv2 detected that the GCamera namespace already exists.".format(merged_file))
+        logging.warning("exiv2 detected that the GCamera namespace already exists.")
     metadata['Xmp.GCamera.MicroVideo'] = pyexiv2.XmpTag('Xmp.GCamera.MicroVideo', 1)
     metadata['Xmp.GCamera.MicroVideoVersion'] = pyexiv2.XmpTag('Xmp.GCamera.MicroVideoVersion', 1)
     metadata['Xmp.GCamera.MicroVideoOffset'] = pyexiv2.XmpTag('Xmp.GCamera.MicroVideoOffset', offset)
@@ -107,7 +107,7 @@ def convert(photo_path, video_path, output_path):
     """Performs the conversion process."""
     if not validate_media(photo_path, video_path):
         logging.error("Invalid photo or video path.")
-        sys.exit(1)
+        return
     merged = merge_files(photo_path, video_path, output_path)
     photo_filesize = os.path.getsize(photo_path)
     merged_filesize = os.path.getsize(merged)
@@ -179,6 +179,18 @@ def process_directory(input_dir, output_dir, move_other_images, convert_all_heic
 
     logging.info("Cleanup complete.")
 
+def delete_original_files():
+    """Deletes only successfully processed original HEIC and MOV/MP4 files."""
+    logging.info("Deleting original HEIC and MOV/MP4 files.")
+    for file_path in processed_files:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logging.info("Deleted original file: {}".format(file_path))
+            except Exception as e:
+                logging.warning(f"Failed to delete file {file_path}: {str(e)}")
+    logging.info("Deletion complete.")
+
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     logging.info("Welcome to the Apple Live Photos to Google Motion Photos converter.")
@@ -224,15 +236,6 @@ def main():
         delete_original_files()
     else:
         logging.info("Original HEIC and MOV/MP4 files will be saved.")
-
-def delete_original_files():
-    """Deletes only successfully processed original HEIC and MOV/MP4 files."""
-    logging.info("Deleting original HEIC and MOV/MP4 files.")
-    for file_path in processed_files:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logging.info("Deleted original file: {}".format(file_path))
-    logging.info("Deletion complete.")
 
 if __name__ == '__main__':
     main()
